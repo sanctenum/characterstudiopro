@@ -1706,7 +1706,8 @@ const newChar = () => ({
   id:uid(), name:"", age:"", height:"",
   physicalAppearances:"", gender:"female",
   personality:[], motivation:"",
-  backstory:[{id:uid(),text:""}],
+  backstory:"",
+  traits:[{id:uid(),text:""}],
   intimacyDetails:"",
   speechPatterns:{ mode:"preset", presetId:null, selectedLines:[], customLines:[] },
   firstMessages:[""]
@@ -1802,8 +1803,16 @@ function formatDocx(bot) {
     s += `Physical Appearances: ${c.physicalAppearances}\n\n`;
     s += `Personality: ${c.personality.join(", ")}\n\n`;
     s += `Motivation: ${c.motivation||""}\n\n`;
+    if ((c.traits||[]).some(e=>e.text&&e.text.trim())) {
+      s += `> Traits\n\n`;
+      (c.traits||[]).forEach(e=>{ if(e.text&&e.text.trim()) s+=`• ${e.text.trim()}\n\n`; });
+    }
     s += `> Backstory\n\n`;
-    c.backstory.forEach(e=>{ if(e.text.trim()) s+=`• ${e.text.trim()}\n\n`; });
+    if (typeof c.backstory === "string") {
+      if (c.backstory.trim()) s += `${c.backstory.trim()}\n\n`;
+    } else if (Array.isArray(c.backstory)) {
+      c.backstory.forEach(e=>{ if(e.text&&e.text.trim()) s+=`${e.text.trim()}\n\n`; });
+    }
     s += `> Intimacy Details\n\n`;
     s += `${c.intimacyDetails||""}\n\n`;
     // Speech Patterns
@@ -1856,8 +1865,16 @@ function formatCharDocx(c, idx) {
   s += `Physical Appearances: ${c.physicalAppearances}\n\n`;
   s += `Personality: ${c.personality.join(", ")}\n\n`;
   s += `Motivation: ${c.motivation||""}\n\n`;
+  if ((c.traits||[]).some(e=>e.text&&e.text.trim())) {
+    s += `> Traits\n\n`;
+    (c.traits||[]).forEach(e=>{ if(e.text&&e.text.trim()) s+=`• ${e.text.trim()}\n\n`; });
+  }
   s += `> Backstory\n\n`;
-  c.backstory.forEach(e=>{ if(e.text.trim()) s+=`• ${e.text.trim()}\n\n`; });
+  if (typeof c.backstory === "string") {
+    if (c.backstory.trim()) s += `${c.backstory.trim()}\n\n`;
+  } else if (Array.isArray(c.backstory)) {
+    c.backstory.forEach(e=>{ if(e.text&&e.text.trim()) s+=`${e.text.trim()}\n\n`; });
+  }
   s += `> Intimacy Details\n\n`;
   s += `${c.intimacyDetails||""}\n\n`;
   const sp = c.speechPatterns;
@@ -2424,6 +2441,7 @@ const SCENARIO_FIELDS = [
 ];
 const CHARACTER_FIELDS = [
   { id:"backstory",     icon:"📖", label:"Backstory"     },
+  { id:"traits",        icon:"🏷", label:"Traits"        },
   { id:"motivation",    icon:"🎯", label:"Motivation"    },
   { id:"personality",   icon:"✨", label:"Personality"   },
   { id:"intimacy",      icon:"🌙", label:"Intimacy"      },
@@ -2463,7 +2481,8 @@ function InsertModal({ content, draft, onApply, onClose, settings }) {
     const char = chars[cIdx];
     const charName = char?.name || `Character ${cIdx+1}`;
     const prompts = {
-      backstory:     `Extract backstory entries for "${charName}" from this text. Format as a bullet list — one entry per line, starting with "- ". Each entry must be 1-2 sentences: the first states the fact clearly, the second adds necessary context or consequence if it meaningfully deepens understanding. Do not pad with filler. Do not omit details that define who the character is, where they come from, or what shaped them. Preserve specific names, places, events, and relationships as given. Do not merge unrelated facts into one entry. Only include what is actually stated or clearly implied in the text.\n\nText:\n${content}`,
+      backstory:     `Write a concise one-paragraph backstory for "${charName}" based on this text. Summarize who they are, where they came from, and what shaped them into the person they are now. Be specific — use names, places, and events from the text. Do not use bullet points. Write in third person. One paragraph only, no more than 5 sentences.\n\nText:\n${content}`,
+      traits:        `Extract distinct character traits for "${charName}" from this text — specific behavioral quirks, habits, mannerisms, and defining characteristics (not personality adjectives). Format as a bullet list — one trait per line, starting with "- ". Each entry is one short sentence describing a specific observable behavior or habit. Only include what is actually stated or clearly implied.\n\nText:\n${content}`,
       premise:       `Write the scenario premise from this text. Cover: who {{user}} is and their role, who the character(s) are, what is happening, how {{user}} and the character(s) are connected, and what the stakes are. 3-5 sentences. Use present tense. Second person for {{user}}, third person for characters. Stay close to what the text says — do not invent details.\n\nText:\n${content}`,
       motivation:    `What drives "${charName}" in this text? 1-2 sentences. State it directly, no padding.\n\nText:\n${content}`,
       personality:   `From this text, identify personality traits for "${charName}" matching from this list: ${TROPES.join(", ")}. Return ONLY matching trait names, comma-separated, max 6.\n\nText:\n${content}`,
@@ -2506,7 +2525,8 @@ Available characters: ${charList}
 
 Rules:
 - Only extract what is actually in the text. Do not invent or pad.
-- backstory: bullet list, one entry per line starting with "- "; each entry is 1-2 sentences — the first states the fact, the second adds context or consequence only if it meaningfully deepens the entry; preserve specific names, places, events, and relationships; do not merge unrelated facts; do not omit character-defining details
+- backstory: one concise paragraph (max 5 sentences) summarizing who the character is, their origin, and what shaped them; third person, no bullet points, no headers
+- traits: bullet list starting with "- "; each entry is a short sentence describing a specific observable behavior, habit, or mannerism; do not use personality adjectives
 - personality: comma-separated trait names only from the allowed list
 - intimacy: use this structure exactly: "Experience: \nSexual Preferences: \nDesires: \nMoans: " — fill only what is present; Desires in 1-2 sentences, Moans as phonetic sounds
 - premise: 3-5 sentences covering who {{user}} is, who the character(s) are, what is happening, how they connect, and the stakes — present tense, stay close to the source
@@ -2526,9 +2546,17 @@ Text:\n${content}`;
     const nd = JSON.parse(JSON.stringify(d));
     switch(f) {
       case "backstory": {
+        const char = nd.characters[ci];
+        if (char) {
+          const existing = typeof char.backstory === "string" ? char.backstory : (Array.isArray(char.backstory) ? char.backstory.map(e=>e.text).filter(Boolean).join(" ") : "");
+          char.backstory = existing ? existing + "\n\n" + text : text;
+        }
+        break;
+      }
+      case "traits": {
         const lines = text.split("\n").map(l=>l.replace(/^[-•*]\s*/,"").trim()).filter(Boolean);
         const char = nd.characters[ci];
-        if (char) char.backstory = [...(char.backstory||[]), ...lines.map(t=>({id:uid(),text:t}))];
+        if (char) char.traits = [...(char.traits||[]), ...lines.map(t=>({id:uid(),text:t}))];
         break;
       }
       case "motivation": { const c=nd.characters[ci]; if(c) c.motivation=(c.motivation?c.motivation+"\n\n":"")+text; break; }
@@ -3486,8 +3514,12 @@ function CharacterPanel({ char, index, canRemove, onRemove, onChange, settings }
           <div className="esub">Motivation</div>
           <textarea className="fta" rows={2} placeholder="What drives this character?"
             value={char.motivation||""} onChange={e=>s("motivation",e.target.value)}/>
+          <div className="esub">Traits</div>
+          <BackstoryList entries={char.traits||[{id:uid(),text:""}]} onChange={v=>s("traits",v)} settings={settings} placeholder="e.g. Fidgets when nervous, always carries a coin…"/>
           <div className="esub">Backstory</div>
-          <BackstoryList entries={char.backstory} onChange={v=>s("backstory",v)} settings={settings}/>
+          <textarea className="fta" rows={5} placeholder="Write a concise backstory paragraph…"
+            value={typeof char.backstory==="string" ? char.backstory : (Array.isArray(char.backstory) ? char.backstory.map(e=>e.text).filter(Boolean).join(" ") : "")}
+            onChange={e=>s("backstory",e.target.value)}/>
           <div className="esub">Speech Patterns</div>
           <SpeechPatternEditor value={char.speechPatterns} onChange={v=>s("speechPatterns",v)}/>
           <div className="esub">Intimacy Details</div>
@@ -3709,7 +3741,7 @@ const autoResize = el => {
   el.style.height = el.scrollHeight + "px";
 };
 
-function BackstoryList({ entries, onChange, settings }) {
+function BackstoryList({ entries, onChange, settings, placeholder }) {
   const dragIdx      = useRef(null);
   const [over,setOver] = useState(null);
   const taRefs       = useRef({});
@@ -3772,7 +3804,7 @@ function BackstoryList({ entries, onChange, settings }) {
             onDrop={()=>{ if(dragIdx.current!=null&&dragIdx.current!==i){const a=[...entries];const[x]=a.splice(dragIdx.current,1);a.splice(i,0,x);onChange(a);}dragIdx.current=null;setOver(null); }}
             onDragEnd={()=>{dragIdx.current=null;setOver(null);}}>
             <span className="bsdrag">⠿</span>
-            <textarea className="bsta" rows={1} placeholder={`Entry ${i+1}…`}
+            <textarea className="bsta" rows={1} placeholder={placeholder||`Entry ${i+1}…`}
               ref={el=>{ if(el){ taRefs.current[e.id]=el; autoResize(el); } else delete taRefs.current[e.id]; }}
               value={e.text}
               onChange={ev=>{ upd(e.id,ev.target.value); autoResize(ev.target); }}
