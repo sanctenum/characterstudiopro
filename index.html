@@ -4,9 +4,31 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Character Studio</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script>
+    window.addEventListener("error", function(e) {
+      if (e.message === "Script error." || !e.message) {
+        // Babel eval error — show a visible overlay
+        var d = document.createElement("div");
+        d.style.cssText = "position:fixed;inset:0;background:#1a0a0a;color:#e07060;font-family:monospace;font-size:13px;padding:32px;z-index:9999;white-space:pre-wrap;overflow:auto;";
+        d.textContent = "⚠ Script Error (cross-origin masked)\n\nThis usually means one of the CDN scripts failed to load.\nCheck the Network tab in DevTools for red/failed requests.\n\nCommon causes:\n• cdnjs / unpkg unreachable from your network\n• Babel failed to parse the JSX\n• A CDN script returned a 404";
+        document.body.appendChild(d);
+        return;
+      }
+      var d = document.createElement("div");
+      d.style.cssText = "position:fixed;inset:0;background:#1a0a0a;color:#e07060;font-family:monospace;font-size:13px;padding:32px;z-index:9999;white-space:pre-wrap;overflow:auto;";
+      d.textContent = "⚠ " + e.message + "\n\n" + (e.error && e.error.stack ? e.error.stack : "no stack") + "\n\nFile: " + e.filename + "\nLine: " + e.lineno;
+      document.body.appendChild(d);
+    });
+    window.addEventListener("unhandledrejection", function(e) {
+      var d = document.createElement("div");
+      d.style.cssText = "position:fixed;inset:0;background:#1a0a0a;color:#e07060;font-family:monospace;font-size:13px;padding:32px;z-index:9999;white-space:pre-wrap;overflow:auto;";
+      d.textContent = "⚠ Unhandled Promise Rejection\n\n" + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason));
+      document.body.appendChild(d);
+    });
+  </script>
+  <script crossorigin="anonymous" src="https://unpkg.com/react@18.2.0/umd/react.development.js"></script>
+  <script crossorigin="anonymous" src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.development.js"></script>
+  <script crossorigin="anonymous" src="https://unpkg.com/@babel/standalone@7.23.2/babel.min.js"></script>
   <!-- Firebase -->
   <script type="module" id="firebase-init">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -1889,8 +1911,22 @@ function useAuth() {
   useEffect(() => {
     const fb = window.__firebase;
     if (!fb) { setReady(true); return; }
-    const unsub = fb.onAuth(u => { setUser(u || false); setReady(true); });
-    return unsub;
+
+    // Safety net: if Firebase auth never calls back (project suspended,
+    // network block, unauthorized domain, etc.), unblock the app after 6s.
+    const fallback = setTimeout(() => {
+      console.warn("[useAuth] Firebase onAuthStateChanged did not fire within 6s — proceeding without auth.");
+      setUser(false);
+      setReady(true);
+    }, 6000);
+
+    const unsub = fb.onAuth(u => {
+      clearTimeout(fallback);
+      setUser(u || false);
+      setReady(true);
+    });
+
+    return () => { clearTimeout(fallback); unsub(); };
   }, []);
 
   const signIn  = useCallback(() => window.__firebase?.signIn().catch(console.error), []);
@@ -4589,7 +4625,7 @@ Write the intro message now. Remember: establish context and setting first, intr
                 {selectedBot && (
                   <div style={{fontFamily:"'Courier Prime',monospace",fontSize:"0.65rem",color:"var(--ink-faint)",lineHeight:1.7,background:"var(--sc-bg)",border:"1px dashed var(--paper-line)",padding:"8px 10px"}}>
                     {selectedBot.characters.map((c,i)=>(
-                      <span key={c.id}>{i>0?" · "}<span style={{color:"var(--red)"}}>{c.name||`Char ${i+1}`}</span>{c.age?` ${c.age}y`:""}</span>
+                      <span key={c.id}>{i>0?" · ":""}<span style={{color:"var(--red)"}}>{c.name||`Char ${i+1}`}</span>{c.age?` ${c.age}y`:""}</span>
                     ))}
                     {selectedBot.scenario?.setting && <><br/><em>{selectedBot.scenario.setting.slice(0,80)}</em></>}
                   </div>
