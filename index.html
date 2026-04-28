@@ -3952,20 +3952,21 @@ function Biomaker({ bots, onBack, settings, dark, onToggle, onSaveBio, onDeleteB
     const lines = [];
     lines.push(`=== SCENARIO: ${bot.title || "Untitled"} ===\n`);
     (bot.characters || []).forEach((c, i) => {
+      if (!c || typeof c !== "object") return;
       lines.push(`--- Character ${i+1}: ${c.name || "Unnamed"} ---`);
       if (c.age)    lines.push(`Age: ${c.age}`);
       if (c.gender) lines.push(`Gender: ${c.gender}`);
       if (c.height) lines.push(`Height: ${c.height}`);
       if (c.physicalAppearances?.trim()) lines.push(`Appearance: ${c.physicalAppearances.trim()}`);
-      if (c.personality?.length) lines.push(`Personality: ${c.personality.join(", ")}`);
+      if (Array.isArray(c.personality) && c.personality.length) lines.push(`Personality: ${c.personality.join(", ")}`);
       if (c.motivation?.trim()) lines.push(`Motivation: ${c.motivation.trim()}`);
-      const bs = (c.backstory||[]).map(e=>e.text?.trim()).filter(Boolean);
+      const bs = Array.isArray(c.backstory) ? c.backstory.map(e=>e?.text?.trim()).filter(Boolean) : [];
       if (bs.length) lines.push(`Backstory:\n${bs.map(b=>`• ${b}`).join("\n")}`);
       if (c.intimacyDetails?.trim()) lines.push(`Intimacy Details: ${c.intimacyDetails.trim()}`);
       const sp = c.speechPatterns;
-      if (sp) {
+      if (sp && typeof sp === "object") {
         const slines = sp.mode==="custom"
-          ? (sp.customLines||[]).filter(l=>l.trim())
+          ? (sp.customLines||[]).filter(l=>l?.trim())
           : (sp.selectedLines||[]);
         if (slines.length) lines.push(`Speech Patterns:\n${slines.map(l=>`• "${l}"`).join("\n")}`);
       }
@@ -3977,10 +3978,10 @@ function Biomaker({ bots, onBack, settings, dark, onToggle, onSaveBio, onDeleteB
     if (sc.timePeriod?.trim())   lines.push(`Time Period: ${sc.timePeriod.trim()}`);
     if (sc.overallTone?.trim())  lines.push(`Tone: ${sc.overallTone.trim()}`);
     if (sc.premise?.trim())      lines.push(`Premise:\n${sc.premise.trim()}`);
-    const dyns = (sc.dynamics||[]).filter(d=>d.description?.trim());
-    if (dyns.length) lines.push(`Character Dynamics:\n${dyns.map(d=>`• ${d.charA} ↔ ${d.charB}: ${d.description.trim()}`).join("\n")}`);
+    const dyns = (Array.isArray(sc.dynamics) ? sc.dynamics : []).filter(d=>d?.description?.trim());
+    if (dyns.length) lines.push(`Character Dynamics:\n${dyns.map(d=>`• ${d.charA||""} ↔ ${d.charB||""}: ${d.description.trim()}`).join("\n")}`);
     if (sc.importantSupportingCharacters?.trim()) lines.push(`Supporting Cast: ${sc.importantSupportingCharacters.trim()}`);
-    const fms = (sc.firstMessages||[]).filter(m=>m?.trim());
+    const fms = (Array.isArray(sc.firstMessages) ? sc.firstMessages : []).filter(m=>m?.trim());
     if (fms.length) lines.push(`Intro Message(s):\n${fms.map((m,i)=>`[Variant ${i+1}] ${m.trim()}`).join("\n\n")}`);
     return lines.join("\n");
   }
