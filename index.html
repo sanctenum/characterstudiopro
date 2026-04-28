@@ -1767,10 +1767,11 @@ const loadBots     = () => {
     const bots = JSON.parse(localStorage.getItem("cs_bots")||"[]");
     // migrate firstMessages from character[0] to scenario if needed
     return bots.map(b => {
-      if (b.scenario && Array.isArray(b.scenario.firstMessages)) return b;
-      const fm = (b.characters && b.characters[0] && Array.isArray(b.characters[0].firstMessages))
-        ? b.characters[0].firstMessages : [""];
-      return { ...b, scenario: { ...(b.scenario||{}), firstMessages: fm } };
+      const characters = Array.isArray(b.characters) ? b.characters : [];
+      if (b.scenario && Array.isArray(b.scenario.firstMessages)) return { ...b, characters };
+      const fm = (characters[0] && Array.isArray(characters[0].firstMessages))
+        ? characters[0].firstMessages : [""];
+      return { ...b, characters, scenario: { ...(b.scenario||{}), firstMessages: fm } };
     });
   } catch { return []; }
 };
@@ -1797,7 +1798,7 @@ const saveChats = c => {
 /* ═══ COPY FORMATTER ═══ */
 function formatDocx(bot) {
   let s = "";
-  bot.characters.forEach((c,i) => {
+  (bot.characters || []).forEach((c,i) => {
     s += `# Character ${i+1}\n\n`;
     s += `> Basic Information\n\n`;
     s += `Name: ${c.name}\n\n`;
@@ -1805,7 +1806,7 @@ function formatDocx(bot) {
     s += `Age: ${c.age}\n\n`;
     s += `Height: ${c.height}\n\n`;
     s += `Physical Appearances: ${c.physicalAppearances}\n\n`;
-    s += `Personality: ${c.personality.join(", ")}\n\n`;
+    s += `Personality: ${(c.personality||[]).join(", ")}\n\n`;
     s += `Motivation: ${c.motivation||""}\n\n`;
     if ((c.traits||[]).some(e=>e.text&&e.text.trim())) {
       s += `> Traits\n\n`;
@@ -2074,7 +2075,7 @@ function App() {
     prevUidRef.current = uid;
     setSyncing(true);
     Promise.all([fsLoadBots(uid), fsLoadSettings(uid)]).then(([fsBots, fsSettings]) => {
-      if (fsBots && fsBots.length > 0) setBots(fsBots);
+      if (fsBots && fsBots.length > 0) setBots(fsBots.map(b => ({ ...b, characters: Array.isArray(b.characters) ? b.characters : [] })));
       if (fsSettings) setSettings(s => ({ ...s, ...fsSettings }));
       setSyncing(false);
     }).catch(() => setSyncing(false));
@@ -3950,7 +3951,7 @@ function Biomaker({ bots, onBack, settings, dark, onToggle, onSaveBio, onDeleteB
     if (!bot) return "";
     const lines = [];
     lines.push(`=== SCENARIO: ${bot.title || "Untitled"} ===\n`);
-    bot.characters.forEach((c, i) => {
+    (bot.characters || []).forEach((c, i) => {
       lines.push(`--- Character ${i+1}: ${c.name || "Unnamed"} ---`);
       if (c.age)    lines.push(`Age: ${c.age}`);
       if (c.gender) lines.push(`Gender: ${c.gender}`);
@@ -4504,7 +4505,7 @@ function Intros({ bots, onBack, settings, onSaveIntro }) {
   function buildContext(bot) {
     if (!bot) return "";
     const sc = bot.scenario || {};
-    const chars = bot.characters.map(c => {
+    const chars = (bot.characters || []).map(c => {
       const parts = [`${c.name||"Character"}${c.age?` (${c.age})`:""}`];
       if (c.gender) parts.push(c.gender);
       if (c.physicalAppearances?.trim()) parts.push(c.physicalAppearances.slice(0,120));
