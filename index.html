@@ -1542,6 +1542,115 @@ const DEFAULT_RULES = [
   "{{char}} will ALWAYS reply in over 500 tokens."
 ];
 const CHUTES_BASE = "https://llm.chutes.ai/v1";
+const DEEPSEEK_BASE = "https://api.deepseek.com";
+const API_PROVIDER_META = {
+  chutes: {
+    id: "chutes",
+    label: "Chutes",
+    base: CHUTES_BASE,
+    keyField: "apiKey",
+    modelField: "selectedChutesModel",
+    keyPlaceholder: "chutes_…",
+    help: "Saved only in this browser. Get one free at chutes.ai"
+  },
+  deepseek: {
+    id: "deepseek",
+    label: "DeepSeek",
+    base: DEEPSEEK_BASE,
+    keyField: "deepseekApiKey",
+    modelField: "selectedDeepseekModel",
+    keyPlaceholder: "sk-…",
+    help: "Saved only in this browser. Create an API key at platform.deepseek.com"
+  }
+};
+const DEEPSEEK_BUILTIN_MODELS = [
+  { id:"deepseek-v4-flash", owner:"deepseek", note:"Official DeepSeek V4 Flash" },
+  { id:"deepseek-v4-pro", owner:"deepseek", note:"Official DeepSeek V4 Pro" },
+  { id:"deepseek-chat", owner:"deepseek", note:"Legacy compatibility alias" },
+  { id:"deepseek-reasoner", owner:"deepseek", note:"Legacy compatibility alias" },
+];
+function getProviderId(settings) {
+  return settings?.apiProvider === "deepseek" ? "deepseek" : "chutes";
+}
+function getProviderMeta(settings) {
+  return API_PROVIDER_META[getProviderId(settings)] || API_PROVIDER_META.chutes;
+}
+function getProviderLabel(settings) {
+  return getProviderMeta(settings).label;
+}
+function getActiveApiKey(settings) {
+  const meta = getProviderMeta(settings);
+  return settings?.[meta.keyField] || "";
+}
+function getActiveModel(settings) {
+  const meta = getProviderMeta(settings);
+  return settings?.[meta.modelField] || (meta.id === "chutes" ? settings?.selectedModel : "") || "";
+}
+function getChatCompletionsUrl(settings) {
+  return `${getProviderMeta(settings).base}/chat/completions`;
+}
+function getModelsUrl(settings) {
+  return `${getProviderMeta(settings).base}/models`;
+}
+function providerNeedsKey(settings) {
+  return !!getActiveApiKey(settings);
+}
+function hasConfiguredApi(settings) {
+  return !!(getActiveApiKey(settings) && getActiveModel(settings));
+}
+function getProviderHeaders(settings) {
+  return { "Content-Type":"application/json", "Authorization":`Bearer ${getActiveApiKey(settings)}` };
+}
+function withProviderModel(settings, modelId) {
+  const meta = getProviderMeta(settings);
+  return { ...settings, selectedModel:modelId, [meta.modelField]:modelId };
+}
+function normalizeModels(raw, providerId) {
+  const arr = raw?.data || raw?.models || (Array.isArray(raw) ? raw : []);
+  const mapped = arr.map(m => ({
+    id: m.id || m.name || m.model || String(m),
+    pricing: m.pricing || null,
+    owner: m.owned_by || m.owner || m.provider || providerId,
+    note: m.note || "",
+  })).filter(m => m.id);
+  const seen = new Set();
+  return mapped.filter(m => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+}
+function defaultModelsForProvider(providerId) {
+  return providerId === "deepseek" ? DEEPSEEK_BUILTIN_MODELS : [];
+}
+function applyGenerationSettings(body, settings) {
+  const providerId = getProviderId(settings);
+  if (settings.proxyTemp    != null) body.temperature       = settings.proxyTemp;
+  if (settings.proxyTopP    != null) body.top_p             = settings.proxyTopP;
+  if (settings.proxyFreqPen != null) body.frequency_penalty = settings.proxyFreqPen;
+  if (settings.proxyPresPen != null) body.presence_penalty  = settings.proxyPresPen;
+  if (providerId === "chutes") {
+    if (settings.proxyTopK   != null) body.top_k              = settings.proxyTopK;
+    if (settings.proxyRepPen != null) body.repetition_penalty = settings.proxyRepPen;
+    if (settings.proxySeed   != null) body.seed               = settings.proxySeed;
+    if (settings.proxyCtx    != null) body.max_context_length = settings.proxyCtx;
+  }
+  return body;
+}
+async function fetchChatCompletion(settings, body, options={}) {
+  const model = getActiveModel(settings);
+  if (!getActiveApiKey(settings)) throw new Error(`${getProviderLabel(settings)} API key is not set.`);
+  if (!model) throw new Error(`${getProviderLabel(settings)} model is not selected.`);
+  return fetch(getChatCompletionsUrl(settings), {
+    method:"POST",
+    headers:getProviderHeaders(settings),
+    body:JSON.stringify({ ...body, model }),
+    signal: options.signal,
+  });
+}
+function mergeThinking(explicitThink, rawText) {
+  const parsed = parseThink(rawText || "");
+  return {
+    thinkContent: [explicitThink, parsed.thinkContent].map(x => (x || "").trim()).filter(Boolean).join("\n\n"),
+    content: parsed.content,
+  };
+}
 
 const ROLEPLAY_HARNESS = `# Roleplay Robustness & Character Fidelity Guide
 ### A Harness Prompt for AI Roleplay & Character Creation Systems — SFW & NSFW
@@ -2107,21 +2216,34 @@ function App() {
 
   useEffect(()=>{ try{saveChats(chats);}catch{} },[chats]);
 
-  /* fetch Chutes model list */
-  const fetchModels = useCallback(async (key) => {
-    if (!key) return;
+  /* fetch model list for selected provider */
+  const fetchModels = useCallback(async (nextSettings=settings) => {
+    const providerId = getProviderId(nextSettings);
+    const key = getActiveApiKey(nextSettings);
     setModLoading(true); setModError("");
     try {
-      const r = await fetch(`${CHUTES_BASE}/models`, { headers:{Authorization:`Bearer ${key}`} });
+      if (!key && providerId !== "deepseek") { setModels([]); return; }
+      if (!key && providerId === "deepseek") { setModels(defaultModelsForProvider(providerId)); return; }
+      const r = await fetch(getModelsUrl(nextSettings), { headers:{Authorization:`Bearer ${key}`} });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
-      const raw = d.data || d.models || (Array.isArray(d)?d:[]);
-      setModels(raw.map(m=>({ id: m.id||m.name, pricing: m.pricing||null })));
-    } catch(e) { setModError("Failed: "+e.message); }
+      const normalized = normalizeModels(d, providerId);
+      const fallback = defaultModelsForProvider(providerId);
+      setModels(normalized.length ? normalized : fallback);
+    } catch(e) {
+      const fallback = defaultModelsForProvider(providerId);
+      if (fallback.length) {
+        setModels(fallback);
+        setModError(`Loaded built-in ${getProviderLabel(nextSettings)} models. Refresh failed: ${e.message}`);
+      } else {
+        setModels([]);
+        setModError("Failed: "+e.message);
+      }
+    }
     finally { setModLoading(false); }
-  },[]);
+  },[settings]);
 
-  useEffect(()=>{ if(settings.apiKey) fetchModels(settings.apiKey); },[settings.apiKey]);
+  useEffect(()=>{ fetchModels(settings); },[settings.apiProvider, settings.apiKey, settings.deepseekApiKey]);
 
   const goNew  = () => { setEditBot(newBot()); setView("editor"); };
   const goEdit = b  => { setPreviewBot(null); setEditBot(JSON.parse(JSON.stringify(b))); setView("editor"); };
@@ -2176,7 +2298,7 @@ function App() {
         open={leftOpen} onClose={()=>setLeftOpen(false)}
         settings={settings} onSettings={setSettings}
         models={models} modLoading={modLoading} modError={modError}
-        onRefresh={()=>fetchModels(settings.apiKey)}
+        onRefresh={()=>fetchModels(settings)}
       />
 
       {view==="editor" && (
@@ -2229,6 +2351,16 @@ function App() {
 ═══════════════════════════════ */
 function LeftPanel({ open, onClose, settings, onSettings, models, modLoading, modError, onRefresh }) {
   const set = (k,v) => onSettings(s=>({...s,[k]:v}));
+  const providerId = getProviderId(settings);
+  const providerMeta = getProviderMeta(settings);
+  const activeKey = getActiveApiKey(settings);
+  const activeModel = getActiveModel(settings);
+  const setProvider = id => onSettings(s => {
+    const meta = API_PROVIDER_META[id] || API_PROVIDER_META.chutes;
+    return { ...s, apiProvider:meta.id, selectedModel:s[meta.modelField] || (meta.id === "chutes" ? s.selectedModel : "") };
+  });
+  const setActiveKey = value => set(providerMeta.keyField, value);
+  const setActiveModel = modelId => onSettings(s => withProviderModel(s, modelId));
   const [advOpen, setAdvOpen] = useState(false);
 
   const fmtPrice = pricing => {
@@ -2248,12 +2380,22 @@ function LeftPanel({ open, onClose, settings, onSettings, models, modLoading, mo
       </div>
       <div className="lp-body">
 
+        {/* ── Provider ── */}
+        <div className="lp-sec">
+          <div className="lp-lbl">API Provider</div>
+          <select className="lp-inp" value={providerId} onChange={e=>setProvider(e.target.value)}>
+            <option value="chutes">Chutes</option>
+            <option value="deepseek">DeepSeek API</option>
+          </select>
+          <div className="lp-hint">Switch between Chutes and DeepSeek's own API platform.</div>
+        </div>
+
         {/* ── API Key ── */}
         <div className="lp-sec">
-          <div className="lp-lbl">Chutes API Key</div>
-          <input className="lp-inp" type="password" placeholder="chutes_…"
-            value={settings.apiKey||""} onChange={e=>set("apiKey",e.target.value)} />
-          <div className="lp-hint">Saved only in this browser. Get one free at chutes.ai</div>
+          <div className="lp-lbl">{providerMeta.label} API Key</div>
+          <input className="lp-inp" type="password" placeholder={providerMeta.keyPlaceholder}
+            value={activeKey} onChange={e=>setActiveKey(e.target.value)} />
+          <div className="lp-hint">{providerMeta.help}</div>
         </div>
 
         <hr className="lp-hr"/>
@@ -2261,38 +2403,40 @@ function LeftPanel({ open, onClose, settings, onSettings, models, modLoading, mo
         {/* ── Models ── */}
         <div className="lp-sec">
           <div className="lp-row">
-            <div className="lp-lbl">Models</div>
-            <button className="lp-btn" onClick={onRefresh} disabled={!settings.apiKey||modLoading}>
+            <div className="lp-lbl">{providerMeta.label} Models</div>
+            <button className="lp-btn" onClick={onRefresh} disabled={(!activeKey && providerId!=="deepseek")||modLoading}>
               {modLoading?"Loading…":"↻ Refresh"}
             </button>
           </div>
-          {!settings.apiKey && <div className="model-note">Enter API key above to load models</div>}
+          {!activeKey && providerId!=="deepseek" && <div className="model-note">Enter API key above to load models</div>}
+          {!activeKey && providerId==="deepseek" && <div className="model-note">Built-in DeepSeek model list shown. Add a key and Refresh to verify live availability.</div>}
           {modError && <div className="model-note" style={{color:"var(--red)"}}>{modError}</div>}
           {!modLoading && models.length>0 && (
             <div className="model-list">
               {models.map(m=>{
                 const price = fmtPrice(m.pricing);
                 return (
-                  <div key={m.id} className={`model-item${settings.selectedModel===m.id?" sel":""}`}
-                    onClick={()=>set("selectedModel",m.id)}>
+                  <div key={m.id} className={`model-item${activeModel===m.id?" sel":""}`}
+                    onClick={()=>setActiveModel(m.id)}>
                     <span className="model-n">{m.id}</span>
                     {price && <span className="model-p">{price}</span>}
+                    {m.note && <span className="model-p">{m.note}</span>}
                   </div>
                 );
               })}
             </div>
           )}
-          {!modLoading && settings.apiKey && models.length===0 && !modError && (
+          {!modLoading && activeKey && models.length===0 && !modError && (
             <div className="model-note">No models found — press Refresh</div>
           )}
         </div>
 
-        {settings.selectedModel && (
+        {activeModel && (
           <>
             <hr className="lp-hr"/>
             <div className="lp-sec">
               <div className="lp-lbl">Active Model</div>
-              <div className="sel-pill">{settings.selectedModel}</div>
+              <div className="sel-pill">{providerMeta.label}: {activeModel}</div>
             </div>
           </>
         )}
@@ -2466,18 +2610,14 @@ function InsertModal({ content, draft, onApply, onClose, settings }) {
   const chars = draft.characters;
 
   const callAI = async (sysPmt, userPmt) => {
-    const res = await fetch(`${CHUTES_BASE}/chat/completions`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json","Authorization":`Bearer ${settings.apiKey}`},
-      body:JSON.stringify({
-        model: settings.selectedModel,
-        messages:[{role:"system",content:sysPmt},{role:"user",content:userPmt}],
-        max_tokens: Math.max(settings.proxyMaxTokens || 1024, 4000), stream:false
-      })
+    const res = await fetchChatCompletion(settings, {
+      messages:[{role:"system",content:sysPmt},{role:"user",content:userPmt}],
+      max_tokens: Math.max(settings.proxyMaxTokens || 1024, 4000), stream:false
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const d = await res.json();
-    return (d.choices?.[0]?.message?.content || "").trim();
+    const msg = d.choices?.[0]?.message || {};
+    return (msg.content || d.error?.message || "").trim();
   };
 
   const processField = async (targetField, cIdx) => {
@@ -2818,7 +2958,7 @@ function RightPanel({ open, onClose, settings, getDraft, chatHistory, setChatHis
     });
   };
 
-  const hasApi = !!(settings.apiKey && settings.selectedModel);
+  const hasApi = hasConfiguredApi(settings);
   const draft  = getDraft();
   const charNames = draft?.characters?.map(c=>c.name||"Unnamed").join(", ")||"—";
 
@@ -2865,34 +3005,20 @@ function RightPanel({ open, onClose, settings, getDraft, chatHistory, setChatHis
     const controller = new AbortController();
     abortRef.current = controller;
 
-    const body = {
-      model: settings.selectedModel,
+    const body = applyGenerationSettings({
       messages: [{role:"system",content:sysPmt},...nextApiHist],
       max_tokens: settings.proxyMaxTokens || 1024,
       stream: !!settings.proxyStream,
-    };
-    if (settings.proxyTemp    != null) body.temperature        = settings.proxyTemp;
-    if (settings.proxyTopP    != null) body.top_p              = settings.proxyTopP;
-    if (settings.proxyTopK    != null) body.top_k              = settings.proxyTopK;
-    if (settings.proxyFreqPen != null) body.frequency_penalty  = settings.proxyFreqPen;
-    if (settings.proxyPresPen != null) body.presence_penalty   = settings.proxyPresPen;
-    if (settings.proxyRepPen  != null) body.repetition_penalty = settings.proxyRepPen;
-    if (settings.proxySeed    != null) body.seed               = settings.proxySeed;
-    if (settings.proxyCtx     != null) body.max_context_length = settings.proxyCtx;
+    }, settings);
 
     try {
-      const res = await fetch(`${CHUTES_BASE}/chat/completions`,{
-        method:"POST",
-        headers:{"Content-Type":"application/json","Authorization":`Bearer ${settings.apiKey}`},
-        body:JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const res = await fetchChatCompletion(settings, body, { signal: controller.signal });
       if (!res.ok) { const t=await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0,300)}`); }
 
       if (settings.proxyStream) {
         const reader = res.body.getReader();
         const dec    = new TextDecoder();
-        let buf="",rawReply="";
+        let buf="",rawReply="",thinkReply="";
         setChatHistory([...nextDisplayHist,{role:"assistant",content:"",thinkContent:"",_rawContent:""}]);
         setLoading(false);
         while(true){
@@ -2908,9 +3034,11 @@ function RightPanel({ open, onClose, settings, getDraft, chatHistory, setChatHis
               try{
                 const chunk=JSON.parse(l.slice(6));
                 const delta=chunk.choices?.[0]?.delta?.content;
-                if(typeof delta==="string"){
-                  rawReply+=delta;
-                  const {thinkContent,content}=parseThink(rawReply);
+                const deltaThink=chunk.choices?.[0]?.delta?.reasoning_content;
+                if(typeof deltaThink==="string") thinkReply+=deltaThink;
+                if(typeof delta==="string") rawReply+=delta;
+                if(typeof delta==="string" || typeof deltaThink==="string"){
+                  const {thinkContent,content}=mergeThinking(thinkReply, rawReply);
                   setChatHistory([...nextDisplayHist,{role:"assistant",content,thinkContent,_rawContent:rawReply}]);
                 }
               }catch{}
@@ -2918,12 +3046,13 @@ function RightPanel({ open, onClose, settings, getDraft, chatHistory, setChatHis
           }
         }
         const finalRaw=rawReply||"(empty response)";
-        const {thinkContent,content}=parseThink(finalRaw);
+        const {thinkContent,content}=mergeThinking(thinkReply, finalRaw);
         setChatHistory([...nextDisplayHist,{role:"assistant",content:content||finalRaw,thinkContent,_rawContent:finalRaw}]);
       } else {
         const data=await res.json();
-        const rawReply=data.choices?.[0]?.message?.content||data.error?.message||"(empty response)";
-        const {thinkContent,content}=parseThink(rawReply);
+        const msg=data.choices?.[0]?.message||{};
+        const rawReply=msg.content||data.error?.message||"(empty response)";
+        const {thinkContent,content}=mergeThinking(msg.reasoning_content||"", rawReply);
         setChatHistory([...nextDisplayHist,{role:"assistant",content:content||rawReply,thinkContent,_rawContent:rawReply}]);
       }
     } catch(e) {
@@ -2940,7 +3069,8 @@ function RightPanel({ open, onClose, settings, getDraft, chatHistory, setChatHis
   };
 
   const onKey = e => { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();} };
-  const modelShort = settings.selectedModel?.split("/").pop() || settings.selectedModel || "—";
+  const activeModelName = getActiveModel(settings);
+  const modelShort = activeModelName?.split("/").pop() || activeModelName || "—";
 
   return (
     <div
@@ -2972,7 +3102,7 @@ function RightPanel({ open, onClose, settings, getDraft, chatHistory, setChatHis
 
       {!hasApi ? (
         <div className="no-api-msg">
-          <p>Open ⚙ Settings,<br/>enter your Chutes API key<br/>and select a model<br/>to use the assistant.</p>
+          <p>Open ⚙ Settings,<br/>choose Chutes or DeepSeek,<br/>enter that provider's API key<br/>and select a model.</p>
         </div>
       ) : (
         <>
@@ -3762,21 +3892,17 @@ function BackstoryList({ entries, onChange, settings, placeholder }) {
   const rm  = id => { if(entries.length>1) onChange(entries.filter(e=>e.id!==id)); };
 
   const shorten = async () => {
-    if (!settings?.apiKey || !settings?.selectedModel) return;
+    if (!hasConfiguredApi(settings)) return;
     setShortening(true);
     const filled = entries.filter(e=>e.text.trim());
     const allText = filled.map((e,i)=>`${i+1}. ${e.text.trim()}`).join("\n");
     try {
-      const res = await fetch(`${CHUTES_BASE}/chat/completions`,{
-        method:"POST",
-        headers:{"Content-Type":"application/json","Authorization":`Bearer ${settings.apiKey}`},
-        body:JSON.stringify({
-          model:settings.selectedModel, max_tokens:600, stream:false,
-          messages:[
-            {role:"system",content:"You are a concise backstory editor. Return ONLY a numbered list, no preamble."},
-            {role:"user",content:`Condense these backstory entries into fewer, tighter entries. Combine related ones, cut redundancy. Keep the most important character-defining details.\n\n${allText}`}
-          ]
-        })
+      const res = await fetchChatCompletion(settings, {
+        max_tokens:600, stream:false,
+        messages:[
+          {role:"system",content:"You are a concise backstory editor. Return ONLY a numbered list, no preamble."},
+          {role:"user",content:`Condense these backstory entries into fewer, tighter entries. Combine related ones, cut redundancy. Keep the most important character-defining details.\n\n${allText}`}
+        ]
       });
       const d = await res.json();
       const raw = (d.choices?.[0]?.message?.content||"").trim();
@@ -4028,8 +4154,8 @@ function Biomaker({ bots, onBack, settings, dark, onToggle, onSaveBio, onDeleteB
   /* ── Analyze references ── */
   const analyze = async () => {
     if (!refs.length) { setError("Upload at least one reference bio first."); return; }
-    if (!settings?.apiKey) { setError("No API key set. Open ⚙ Settings."); return; }
-    if (!settings?.selectedModel) { setError("No model selected. Open ⚙ Settings."); return; }
+    if (!getActiveApiKey(settings)) { setError(`No ${getProviderLabel(settings)} API key set. Open ⚙ Settings.`); return; }
+    if (!getActiveModel(settings)) { setError(`No ${getProviderLabel(settings)} model selected. Open ⚙ Settings.`); return; }
     setError(""); setStep("analyzing");
 
     const refContent = buildRefContent(refs);
@@ -4049,19 +4175,15 @@ Return ONLY valid JSON (no markdown fences, no preamble) with this exact structu
 
     try {
       const dump = scenarioDump(selectedBot);
-      const res = await fetch(`${CHUTES_BASE}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json", "Authorization":`Bearer ${settings.apiKey}` },
-        body: JSON.stringify({
-          model: settings.selectedModel, max_tokens: 1200, stream: false,
-          messages: [
-            { role:"system", content: SYS },
-            { role:"user",   content: [
-              { type:"text", text:`Analyze these ${refs.length} reference JanitorAI bio(s) and return the JSON inference:` },
-              ...refContent
-            ]}
-          ]
-        })
+      const res = await fetchChatCompletion(settings, {
+        max_tokens: 1200, stream: false,
+        messages: [
+          { role:"system", content: SYS },
+          { role:"user",   content: [
+            { type:"text", text:`Analyze these ${refs.length} reference JanitorAI bio(s) and return the JSON inference:` },
+            ...refContent
+          ]}
+        ]
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d   = await res.json();
@@ -4082,7 +4204,7 @@ Return ONLY valid JSON (no markdown fences, no preamble) with this exact structu
   const generate = async () => {
     if (!selectedBot) { setError("Select a scenario card first."); return; }
     if (!inference)   { setError("Analyze references first."); return; }
-    if (!settings?.apiKey || !settings?.selectedModel) { setError("API key / model not set."); return; }
+    if (!hasConfiguredApi(settings)) { setError(`${getProviderLabel(settings)} API key / model not set.`); return; }
     if (generatingRef.current) return; // prevent double-tap
 
     setError("");
@@ -4128,15 +4250,10 @@ Write the bio now. Output ONLY the bio text. No em-dashes. No melodrama. No AI-s
     ];
 
     try {
-      const res = await fetch(`${CHUTES_BASE}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json", "Authorization":`Bearer ${settings.apiKey}` },
-        body: JSON.stringify({
-          model: settings.selectedModel,
-          max_tokens: Math.max(settings.proxyMaxTokens || 1500, 2000),
-          stream: true,
-          messages: [{ role:"system", content: SYS }, { role:"user", content: userContent }]
-        })
+      const res = await fetchChatCompletion(settings, {
+        max_tokens: Math.max(settings.proxyMaxTokens || 1500, 2000),
+        stream: true,
+        messages: [{ role:"system", content: SYS }, { role:"user", content: userContent }]
       });
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
@@ -4147,6 +4264,7 @@ Write the bio now. Output ONLY the bio text. No em-dashes. No melodrama. No AI-s
       const reader   = res.body.getReader();
       const dec      = new TextDecoder();
       let   rawAll   = "";
+      let   thinkAll = "";
       let   leftover = "";
 
       while (true) {
@@ -4163,8 +4281,10 @@ Write the bio now. Output ONLY the bio text. No em-dashes. No melodrama. No AI-s
             try {
               const parsed = JSON.parse(l.slice(6));
               const delta  = parsed.choices?.[0]?.delta?.content;
-              if (typeof delta === "string") {
-                rawAll += delta;
+              const deltaThink = parsed.choices?.[0]?.delta?.reasoning_content;
+              if (typeof deltaThink === "string") thinkAll += deltaThink;
+              if (typeof delta === "string") rawAll += delta;
+              if (typeof delta === "string" || typeof deltaThink === "string") {
                 // Real-time: split think vs bio
                 // Everything inside the LAST unclosed <think> is still thinking
                 const closedThink  = rawAll.replace(/<think>([\s\S]*?)<\/think>/gi, (_, inner) => {
@@ -4179,7 +4299,7 @@ Write the bio now. Output ONLY the bio text. No em-dashes. No melodrama. No AI-s
                 const liveThink = openThinkMatch
                   ? rawAll.replace(/^[\s\S]*<think>/i, "")   // everything after the last <think>
                   : "";
-                const allThink = [...thinkParts, liveThink].filter(Boolean).join("\n\n");
+                const allThink = [thinkAll, ...thinkParts, liveThink].filter(Boolean).join("\n\n");
                 setThinkContent(allThink);
                 setOutput(withoutThink.trim());
               }
@@ -4188,7 +4308,7 @@ Write the bio now. Output ONLY the bio text. No em-dashes. No melodrama. No AI-s
         }
       }
       // Final clean parse
-      const { thinkContent: tc, content: bio } = parseThink(rawAll);
+      const { thinkContent: tc, content: bio } = mergeThinking(thinkAll, rawAll);
       setThinkContent(tc);
       setOutput(bio);
       setStep("done");
@@ -4533,7 +4653,7 @@ function Intros({ bots, onBack, settings, onSaveIntro }) {
   const generate = async () => {
     if (!selectedBot) { setError("Select a bot card first."); return; }
     if (!scenarioDesc.trim()) { setError("Describe the scenario for this intro first."); return; }
-    if (!settings?.apiKey || !settings?.selectedModel) { setError("API key / model not configured."); return; }
+    if (!hasConfiguredApi(settings)) { setError(`${getProviderLabel(settings)} API key / model not configured.`); return; }
     if (generatingRef.current) return;
 
     setError(""); setOutput(""); setThinkContent("");
@@ -4567,15 +4687,10 @@ ${scenarioDesc.trim()}
 Write the intro message now. Remember: establish context and setting first, introduce characters second, move toward the inciting moment third, end with a hook. No em-dashes. Natural voice. Output ONLY the intro message.`;
 
     try {
-      const res = await fetch(`${CHUTES_BASE}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json", "Authorization":`Bearer ${settings.apiKey}` },
-        body: JSON.stringify({
-          model: settings.selectedModel,
-          max_tokens: 1500,
-          stream: true,
-          messages: [{ role:"system", content:SYS }, { role:"user", content:userMsg }]
-        })
+      const res = await fetchChatCompletion(settings, {
+        max_tokens: 1500,
+        stream: true,
+        messages: [{ role:"system", content:SYS }, { role:"user", content:userMsg }]
       });
       if (!res.ok) {
         const errText = await res.text().catch(()=>"");
@@ -4586,6 +4701,7 @@ Write the intro message now. Remember: establish context and setting first, intr
       const reader   = res.body.getReader();
       const dec      = new TextDecoder();
       let   rawAll   = "";
+      let   thinkAll = "";
       let   leftover = "";
 
       while (true) {
@@ -4600,22 +4716,25 @@ Write the intro message now. Remember: establish context and setting first, intr
           if (!l || l === "data: [DONE]") continue;
           if (l.startsWith("data: ")) {
             try {
-              const delta = JSON.parse(l.slice(6)).choices?.[0]?.delta?.content;
-              if (typeof delta === "string") {
-                rawAll += delta;
+              const parsed = JSON.parse(l.slice(6));
+              const delta = parsed.choices?.[0]?.delta?.content;
+              const deltaThink = parsed.choices?.[0]?.delta?.reasoning_content;
+              if (typeof deltaThink === "string") thinkAll += deltaThink;
+              if (typeof delta === "string") rawAll += delta;
+              if (typeof delta === "string" || typeof deltaThink === "string") {
                 const closed = rawAll.replace(/<think>([\s\S]*?)<\/think>/gi, (_,inner)=>`\x00T\x00${inner.trim()}\x00/T\x00`);
                 const thinkParts = [];
                 const withoutThink = closed.replace(/\x00T\x00([\s\S]*?)\x00\/T\x00/g, (_,t)=>{ thinkParts.push(t); return ""; });
                 const openMatch = rawAll.match(/<think>([\s\S]*)$/i);
                 const liveThink = openMatch ? rawAll.replace(/^[\s\S]*<think>/i,"") : "";
-                setThinkContent([...thinkParts,liveThink].filter(Boolean).join("\n\n"));
+                setThinkContent([thinkAll,...thinkParts,liveThink].filter(Boolean).join("\n\n"));
                 setOutput(withoutThink.trim());
               }
             } catch {}
           }
         }
       }
-      const { thinkContent:tc, content:intro } = parseThink(rawAll);
+      const { thinkContent:tc, content:intro } = mergeThinking(thinkAll, rawAll);
       setThinkContent(tc);
       setOutput(intro);
 
